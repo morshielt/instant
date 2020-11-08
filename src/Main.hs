@@ -1,19 +1,19 @@
 import           System.Environment             ( getArgs )
 import           System.Exit                    ( exitFailure )
-import           System.FilePath.Posix          ( replaceExtension )
+import           System.FilePath.Posix          ( replaceExtension
+                                                , takeBaseName
+                                                )
 import           System.IO                      ( stderr
                                                 , hPutStrLn
                                                 )
 import           Control.Monad.Except
+import           Control.Monad                  ( when )
 
 import           CompilerLLVM
+import           CompilerJVM
 
 import           ParInstant
-import           AbsInstant
-
 import           ErrM
-
-import           Control.Monad                  ( when )
 import           PrintInstant
 
 showTree :: (Show a, Print a) => a -> IO ()
@@ -22,14 +22,14 @@ showTree tree = do
     putStrLn $ "\n[Linearized tree]\n\n" ++ printTree tree
 
 
-check :: String -> IO String
-check s = case pProgram (myLexer s) of
+check :: String -> String -> IO String
+check file s = case pProgram (myLexer s) of
     Bad err -> do
         hPutStrLn stderr $ "[Syntax error] " ++ err
         exitFailure
     Ok tree -> do
         showTree tree
-        genCode <- runExceptT $ compileLLVM tree
+        genCode <- runExceptT $ compileJVM (takeBaseName file) tree
         case genCode of
             Left e -> do
                 hPutStrLn stderr $ "[Compiler exception] " ++ e
@@ -53,7 +53,8 @@ check s = case pProgram (myLexer s) of
 
 saveFile :: String -> String -> IO ()
 saveFile filename content = do
-    let name = replaceExtension filename ".ll"
+    -- let name = replaceExtension filename ".ll"
+    let name = replaceExtension filename ".j"
     writeFile name content
     return ()
 
@@ -61,11 +62,7 @@ main :: IO ()
 main = do
     args <- getArgs
     case args of
-        [file] -> readFile file >>= check >>= saveFile file
-            -- do
-            -- cont <- readFile file
-            -- res  <- check cont
-            -- saveFile file res
+        [file] -> readFile file >>= check file >>= saveFile file
         _      -> do
             putStrLn "Usage: ??? <SourceFile>"
             exitFailure
