@@ -1,10 +1,11 @@
 module CompilerLLVM where
 
 import           Control.Monad.State            ( StateT
-                                                , runStateT
+                                                , evalStateT
                                                 , get
                                                 , gets
                                                 , modify
+                                                , foldM
                                                 )
 import           Control.Monad.Except           ( ExceptT
                                                 , lift
@@ -18,10 +19,44 @@ import           Data.Map                      as M
                                                 )
 
 import           AbsInstant
+import           Utils
 
 -- TODO: sdiv czy udiv sprawdzić
 
-transAss :: Ident -> Exp -> LLM String
+type Var = String
+type Register = Integer
+type Store = M.Map Var Register
+
+data LLState = LLState
+  { varToRegister :: Store
+  , freeRegister :: Register
+  }
+
+type LLM a = StateT LLState (ExceptT String IO) a
+
+compileLLVM :: String -> Program -> ExceptT String IO String
+compileLLVM file (Prog prog) = evalStateT (gen prog) initialState
+  where
+    gen :: [Stmt] -> LLM String
+    gen stmts = flip ($) "" <$> genExpr stmts
+    initialState :: LLState
+    initialState = LLState M.empty 0
+
+genExpr :: [Stmt] -> LLM ShowS
+genExpr ss = flip (.) llvmOutro <$> foldM go llvmIntro ss
+  where
+    go accCode stmt = do
+        code <- transStmt stmt
+        return (accCode . code)
+
+transStmt :: Stmt -> LLM ShowS
+transStmt x = case x of
+    SAss ident exp -> transAss ident exp
+    SExp exp       -> do
+        (code, reg) <- transExp exp
+        return $ code . printf reg
+
+transAss :: Ident -> Exp -> LLM ShowS
 transAss (Ident ident) exp = do
     (code, expReg) <- transExp exp
     state          <- get
@@ -34,110 +69,86 @@ transAss (Ident ident) exp = do
                     , freeRegister  = register + 1
                     }
                 )
-            return $ code ++ alloca register ++ store expReg register
-        Just register -> return $ code ++ store expReg register
+            return $ code . alloca register . store expReg register
+        Just register -> return $ code . store expReg register
 
--- tutaj printować expy
-transStmt :: Stmt -> LLM String
-transStmt x = case x of
-    SAss ident exp -> transAss ident exp
-    -- SExp (ExpLit int) -> do
-    --     register <- gets freeRegister
-    --     let register2 = register + 1
-    --     modify (\st -> st { freeRegister = register2 + 1 })
-    --     return
-    --         $  alloca register
-    --         ++ store (show int) register
-    --         ++ load register2 register
-    --         ++ printf (regName register2)
-    SExp exp       -> do
-        (code, reg) <- transExp exp
-        return $ code ++ printf reg
-
-
-transExp :: Exp -> LLM (String, String)
-transExp (ExpLit integer      ) = return ("", show integer)
+transExp :: Exp -> LLM (ShowS, ShowS)
+transExp (ExpLit integer      ) = return (nop, shows integer)
 transExp (ExpVar (Ident ident)) = do
     state <- get
     case M.lookup ident (varToRegister state) of
-        Nothing -> lift . throwE $ "Undefined variable"
+        Nothing -> lift . throwE $ "Undefined variable" ++ ident
         Just id -> do
             let register = freeRegister state
             modify (\st -> st { freeRegister = register + 1 })
             return (load register id, regName register)
-transExp x =
-    let
-        go exp1 exp2 op = do
-            (code1, expReg1) <- transExp exp1
-            (code2, expReg2) <- transExp exp2
-            register         <- gets freeRegister
-            modify (\st -> st { freeRegister = register + 1 })
-            return
-                ( code1 ++ code2 ++ binOp op expReg1 expReg2 register
-                , regName register
-                )
-    in  case x of
-            ExpAdd exp1 exp2 -> go exp1 exp2 "add"
-            ExpSub exp1 exp2 -> go exp1 exp2 "sub"
-            ExpMul exp1 exp2 -> go exp1 exp2 "mul"
-            ExpDiv exp1 exp2 -> go exp1 exp2 "sdiv"
+transExp (ExpAdd exp1 exp2) = transBinOp exp1 exp2 (showString "add")
+transExp (ExpSub exp1 exp2) = transBinOp exp1 exp2 (showString "sub")
+transExp (ExpMul exp1 exp2) = transBinOp exp1 exp2 (showString "mul")
+transExp (ExpDiv exp1 exp2) = transBinOp exp1 exp2 (showString "sdiv")
 
-genExpr :: [Stmt] -> LLM [String]
-genExpr (s : stmts) = do
-    genCode <- transStmt s
-    rest    <- genExpr stmts
-    return $ genCode : rest
-genExpr [] = return [llvmOutro]
+transBinOp :: Exp -> Exp -> ShowS -> LLM (ShowS, ShowS)
+transBinOp exp1 exp2 op = do
+    (code1, expReg1) <- transExp exp1
+    (code2, expReg2) <- transExp exp2
+    register         <- gets freeRegister
+    modify (\st -> st { freeRegister = register + 1 })
+    return (code1 . code2 . binOp op expReg1 expReg2 register, regName register)
 
-gen :: [Stmt] -> LLM [String]
-gen stmts = do
-    code <- genExpr stmts
-    return $ llvmIntro : code
 
-compileLLVM (Prog prog) = runStateT (gen prog) initialState
-    where initialState = LLState M.empty 0
-
-type Var = String
-type Register = Integer
-
-type LLM a = StateT LLState (ExceptT String IO) a
-
-type Store = M.Map Var Register
-
-data LLState = LLState
-  { varToRegister :: Store
-  , freeRegister :: Register
-  }
-
-regName :: Integer -> String
-regName reg = "%r" ++ show reg
-
-llvmIntro = unlines
+llvmIntro, llvmOutro :: ShowS
+llvmIntro = showSify
     [ "@dnl = internal constant [4 x i8] c\"%d\\0A\\00\""
-    , ""
     , "declare i32 @printf(i8*, ...)"
+    , ""
     , "define void @printInt(i32 %x) {"
-    , "%t0 = getelementptr [4 x i8], [4 x i8]* @dnl, i32 0, i32 0"
-    , "call i32 (i8*, ...) @printf(i8* %t0, i32 %x)"
-    , "ret void"
+    , "  %t0 = getelementptr [4 x i8], [4 x i8]* @dnl, i32 0, i32 0"
+    , "  call i32 (i8*, ...) @printf(i8* %t0, i32 %x)"
+    , "  ret void"
     , "}"
+    , ""
     , "define i32 @main() {"
     ]
+llvmOutro = showString "  ret i32 0 \n}"
 
-llvmOutro = "ret i32 0 \n}"
+regName :: Integer -> ShowS
+regName reg = showString "%r" . shows reg
 
-alloca :: Register -> String
-alloca reg = regName reg ++ " = alloca i32, align 4\n"
+alloca :: Register -> ShowS
+alloca reg =
+    showString "  " . regName reg . showString " = alloca i32" . align4endl
 
-load :: Register -> Register -> String
-load to from = regName to ++ " = load i32, i32* " ++ regName from ++ "\n"
+load :: Register -> Register -> ShowS
+load to from =
+    showString "  "
+        . regName to
+        . showString " = load i32, i32* "
+        . regName from
+        . align4endl
 
-store :: String -> Register -> String
-store val to = "store i32 " ++ val ++ ", i32* " ++ regName to ++ ", align 4\n"
+store :: ShowS -> Register -> ShowS
+store val to =
+    showString "  store i32 "
+        . val
+        . showString ", i32* "
+        . regName to
+        . align4endl
 
-printf :: String -> String
-printf val = "call void @printInt(i32 " ++ val ++ ")\n"
+printf :: ShowS -> ShowS
+printf val =
+    showString "  call void @printInt(i32 " . val . showString ")" . endl
 
-binOp :: String -> String -> String -> Register -> String
+binOp :: ShowS -> ShowS -> ShowS -> Register -> ShowS
 binOp op val1 val2 to =
-    regName to ++ " = " ++ op ++ " i32 " ++ val1 ++ ", " ++ val2 ++ "\n"
+    showString "  "
+        . regName to
+        . showString " = "
+        . op
+        . showString " i32 "
+        . val1
+        . showString ", "
+        . val2
+        . endl
+
+align4endl :: ShowS
+align4endl = showString ", align 4" . endl

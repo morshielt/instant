@@ -2,11 +2,12 @@ module CompilerJVM where
 
 import           Control.Exception              ( assert )
 import           Control.Monad.State            ( StateT
-                                                , runStateT
+                                                , evalStateT
                                                 , get
                                                 , gets
                                                 , modify
                                                 , liftIO
+                                                , foldM
                                                 )
 import           Control.Monad.Except           ( ExceptT
                                                 , lift
@@ -20,149 +21,154 @@ import           Data.Map                      as M
                                                 , assocs
                                                 , size
                                                 )
+import           Data.Maybe                     ( isNothing )
 
 import           AbsInstant
+import           Utils
 
-transAss :: Ident -> Exp -> JM String
-transAss (Ident ident) exp = do
-    (code, expStack, _) <- transExp exp
-    state               <- get
-    case M.lookup ident (varToIndex state) of
-        Nothing -> do
-            let index = fromIntegral $ M.size $ varToIndex state
-            modify
-                (\st -> st { varToIndex = M.insert ident index (varToIndex st)
-                           , maxStack   = max expStack (maxStack st)
-                           }
-                )
-            return (code ++ istore index)
-        Just index -> return (code ++ istore index)
-
--- tutaj printować expy
-transStmt :: Stmt -> JM String
-transStmt x = case x of
-    SAss ident exp -> transAss ident exp
-    SExp exp       -> do
-        (code, stack, _) <- transExp exp
-        -- (liftIO . putStrLn) ("stack SExp: " ++ show stack)
-        modify (\st -> st { maxStack = max 2 $ max stack (maxStack st) })
-        return (code ++ printf)
-
-
-transExp :: Exp -> JM (String, StackHeight, ExpDifficulty)
-transExp (ExpLit integer      ) = return (ipush integer, 1, 1)
-transExp (ExpVar (Ident ident)) = do
-    varToIndex <- gets varToIndex
-    case M.lookup ident varToIndex of
-        Nothing    -> lift . throwE $ "Undefined variable"
-        Just index -> return (iload index, 1, 1)
-
--- TODO: zabić swap dla + i * bo przemienne gówniaki są
-transExp x =
-    let
-        go exp1 exp2 op optionalSwap = do
-            (code1, stack1, diff1) <- transExp exp1
-            (code2, stack2, diff2) <- transExp exp2
-
-            let stack =
-                    if stack1 == stack2 then stack1 + 1 else max stack1 stack2
-            -- (liftIO . putStrLn) (show stack ++ "\n" ++ show exp1 ++ "\n" ++ show exp2)
-            let code = if diff1 >= diff2
-                    then code1 ++ code2 ++ op
-                    else code2 ++ code1 ++ optionalSwap ++ op
-            let diff = diff1 + diff2 + 1
-            -- TODO: remove asserts
-            if diff1 >= diff2
-                then assert (stack1 >= stack2) return (code, stack, diff)
-                else assert (stack1 <= stack2) return (code, stack, diff)
-    in  case x of
-            ExpAdd exp1 exp2 -> go exp1 exp2 "iadd\n" ""
-            ExpSub exp1 exp2 -> go exp1 exp2 "isub\n" swap
-            ExpMul exp1 exp2 -> go exp1 exp2 "imul\n" ""
-            ExpDiv exp1 exp2 -> go exp1 exp2 "idiv\n" swap
-
-genExpr :: [Stmt] -> JM [String]
-genExpr (s : stmts) = do
-    genCode <- transStmt s
-    rest    <- genExpr stmts
-    -- s       <- gets varToIndex
-    -- (liftIO . putStrLn) (show $ assocs s)
-    return (genCode : rest)
-genExpr [] = return [jvmOutro]
-
-gen :: String -> [Stmt] -> JM [String]
-gen file stmts = do
-    code  <- genExpr stmts
-    state <- get
-    return
-        $ jvmIntro file
-        : jvmLimits (maxStack state) (max 1 (M.size $ varToIndex state))
-        : code
-
-compileJVM file (Prog prog) = runStateT (gen file prog) initialState
-    where initialState = JState M.empty 0
-    -- TODO: od 0 czy od 1 rejestry!
-    -- where initialState = JState M.empty 1 0
-
-type Var = String
-type Index = Integer
-type StackHeight = Integer
 type ExpDifficulty = Integer
 
-type Store = M.Map Var Integer
+type Var = String
+type Location = Integer
+type Store = M.Map Var Location
+
+type Stack = Integer
 data JState = JState
-  { varToIndex :: Store
---   , freeIndex :: Index
-  , maxStack :: StackHeight
+  { varToLoc :: Store
+  , maxStack :: Stack
   }
+
 type JM a = StateT JState (ExceptT String IO) a
 
-jvmIntro :: String -> String
-jvmIntro className = unlines
+compileJVM :: String -> Program -> ExceptT String IO String
+compileJVM file (Prog prog) = evalStateT (gen file prog) initialState
+  where
+    gen :: String -> [Stmt] -> JM String
+    gen file stmts = do
+        code  <- genExpr stmts
+        state <- get
+        let stack  = maxStack state
+        let locals = max 1 (fromIntegral $ M.size $ varToLoc state)
+        return $ jvmIntro file . jvmLimits stack locals . code $ ""
+
+    initialState :: JState
+    initialState = JState M.empty 0
+
+genExpr :: [Stmt] -> JM ShowS
+genExpr ss = flip (.) jvmOutro <$> foldM go nop ss
+  where
+    go accCode stmt = do
+        code <- transStmt stmt
+        return (accCode . code)
+
+transStmt :: Stmt -> JM ShowS
+transStmt (SAss ident exp) = transAss ident exp
+transStmt (SExp exp      ) = do
+    (code, stack, _) <- transExp exp
+    modify (\st -> st { maxStack = max printfStack $ max stack $ maxStack st })
+    return (code . printf)
+    where printfStack = 2
+
+transAss :: Ident -> Exp -> JM ShowS
+transAss (Ident ident) exp = do
+    (code, expStack, _) <- transExp exp
+    modify (\st -> st { maxStack = max expStack $ maxStack st })
+    index <- retrieveOrAlloc
+    return (code . istore index)
+  where
+    retrieveOrAlloc :: JM Integer
+    retrieveOrAlloc = do
+        state <- get
+        case M.lookup ident (varToLoc state) of
+            Nothing -> do
+                let index = fromIntegral $ M.size $ varToLoc state
+                modify
+                    (\st -> st { varToLoc = M.insert ident index $ varToLoc st }
+                    )
+                return index
+            Just index -> return index
+
+transExp :: Exp -> JM (ShowS, Stack, ExpDifficulty)
+transExp (ExpLit integer      ) = return (ipush integer, 1, 1)
+transExp (ExpVar (Ident ident)) = do
+    varToLoc <- gets varToLoc
+    case M.lookup ident varToLoc of
+        Nothing    -> lift . throwE $ "Undefined variable " ++ ident
+        Just index -> return (iload index, 1, 1)
+transExp (ExpAdd exp1 exp2) = transBinOp exp1 exp2 (showString "  iadd\n") nop
+transExp (ExpSub exp1 exp2) = transBinOp exp1 exp2 (showString "  isub\n") swap
+transExp (ExpMul exp1 exp2) = transBinOp exp1 exp2 (showString "  imul\n") nop
+transExp (ExpDiv exp1 exp2) = transBinOp exp1 exp2 (showString "  idiv\n") swap
+
+transBinOp :: Exp -> Exp -> ShowS -> ShowS -> JM (ShowS, Stack, ExpDifficulty)
+transBinOp exp1 exp2 op optionalSwap = do
+    (code1, stack1, diff1) <- transExp exp1
+    (code2, stack2, diff2) <- transExp exp2
+
+    let stack = if stack1 == stack2 then stack1 + 1 else max stack1 stack2
+    -- (liftIO . putStrLn) (show stack ++ "\n" ++ show exp1 ++ "\n" ++ show exp2)
+    let code = if diff1 >= diff2
+            then code1 . code2 . op
+            else code2 . code1 . optionalSwap . op
+    let diff = diff1 + diff2 + 1
+    -- TODO: remove asserts
+    if diff1 >= diff2
+        then assert (stack1 >= stack2) return (code, stack, diff)
+        else assert (stack1 <= stack2) return (code, stack, diff)
+
+
+jvmIntro :: String -> ShowS
+jvmIntro className = showSify
     [ ".class  public " ++ className
     , ".super  java/lang/Object"
     , ""
-    , "; standard initializer"
     , ".method public <init>()V"
-    , "   aload_0"
-    , "   invokespecial java/lang/Object/<init>()V"
-    , "   return"
+    , "  aload_0"
+    , "  invokespecial java/lang/Object/<init>()V"
+    , "  return"
     , ".end method"
+    , ""
     , ".method public static main([Ljava/lang/String;)V"
     ]
 
--- jvmLimits :: StackHeight -> Integer -> String
+jvmLimits :: Stack -> Integer -> ShowS
 jvmLimits stack locals =
-    " .limit stack " ++ show stack ++ "\n .limit locals " ++ show locals ++ "\n"
+    showString ".limit stack "
+        . shows stack
+        . endl
+        . showString ".limit locals "
+        . shows locals
+        . endl
 
-jvmOutro = "return\n.end method"
+jvmOutro :: ShowS
+jvmOutro = showSify ["  return", ".end method"]
 
-iload :: Index -> String
+iload :: Location -> ShowS
 iload index =
-    let iload = if index `elem` [0 .. 3] then "iload_" else "iload "
-    in  iload ++ show index ++ "\n"
+    let iload = if index `elem` [0 .. 3] then "  iload_" else "  iload "
+    in  showString iload . shows index . endl
 
-istore :: Index -> String
+istore :: Location -> ShowS
 istore index =
-    let istore = if index `elem` [0 .. 3] then "istore_" else "istore "
-    in  istore ++ show index ++ "\n"
+    let istore = if index `elem` [0 .. 3] then "  istore_" else "  istore "
+    in  showString istore . shows index . endl
 
-ipush :: Integer -> String
+ipush :: Integer -> ShowS
 ipush val =
-    let push val | val == -1                    = "iconst_m1"
-                 | val `elem` [0 .. 5]          = "iconst_"
-                 | val >= -128 && val < 128     = "bipush "
-                 | val >= -32768 && val < 32768 = "sipush "
-                 | otherwise                    = "ldc "
-    in  push val ++ show val ++ "\n"
+    let push val | val == -1                              = "  iconst_m1"
+                 | val `elem` [0 .. 5]                    = "  iconst_"
+                 | val >= -byteRange && val < byteRange   = "  bipush "
+                 | val >= -shortRange && val < shortRange = "  sipush "
+                 | otherwise                              = "  ldc "
+    in  showString (push val) . shows val . endl
+  where
+    byteRange  = 128
+    shortRange = 32768
 
-printf :: String
-printf = unlines
-    [ "getstatic  java/lang/System/out Ljava/io/PrintStream;"
-    , "swap"
-    , "invokevirtual  java/io/PrintStream/println(I)V"
+printf, swap :: ShowS
+printf = showSify
+    [ "  getstatic  java/lang/System/out Ljava/io/PrintStream;"
+    , "  swap"
+    , "  invokevirtual  java/io/PrintStream/println(I)V"
     ]
-
-swap = "swap\n"
-
-nop = ""
+swap = showString "  swap\n"
