@@ -1,0 +1,3 @@
+#!/bin/bash
+./compiler jvm $@
+java -jar lib/jasmin.jar -d ${@%/*} "${@%.*}.j"

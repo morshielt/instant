@@ -1,12 +1,15 @@
-module CompilerJVM where
+module CompilerJVM
+    ( compileJVM
+    )
+where
 
+-- TODO: remove assert import
 import           Control.Exception              ( assert )
 import           Control.Monad.State            ( StateT
                                                 , evalStateT
                                                 , get
                                                 , gets
                                                 , modify
-                                                , liftIO
                                                 , foldM
                                                 )
 import           Control.Monad.Except           ( ExceptT
@@ -18,10 +21,8 @@ import           Data.Map                      as M
                                                 , empty
                                                 , lookup
                                                 , insert
-                                                , assocs
                                                 , size
                                                 )
-import           Data.Maybe                     ( isNothing )
 
 import           AbsInstant
 import           Utils

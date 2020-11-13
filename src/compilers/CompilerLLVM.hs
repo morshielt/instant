@@ -1,4 +1,7 @@
-module CompilerLLVM where
+module CompilerLLVM
+    ( compileLLVM
+    )
+where
 
 import           Control.Monad.State            ( StateT
                                                 , evalStateT
@@ -22,7 +25,7 @@ import           AbsInstant
 import           Utils
 
 -- TODO: sdiv czy udiv sprawdzić
-
+-- TODO: align 4 czy bez?
 type Var = String
 type Register = Integer
 type Store = M.Map Var Register
@@ -109,7 +112,7 @@ llvmIntro = showSify
     , ""
     , "define i32 @main() {"
     ]
-llvmOutro = showString "  ret i32 0 \n}"
+llvmOutro = showSify ["  ret i32 0", "}"]
 
 regName :: Integer -> ShowS
 regName reg = showString "%r" . shows reg

@@ -1,3 +1,4 @@
+import           Data.Char                      ( toLower )
 import           System.Environment             ( getArgs )
 import           System.Exit                    ( exitFailure )
 import           System.FilePath.Posix          ( replaceExtension
@@ -9,8 +10,8 @@ import           System.IO                      ( stderr
 import           Control.Monad.Except
 import           Control.Monad                  ( when )
 
-import           CompilerLLVM
-import           CompilerJVM
+import           CompilerLLVM                   ( compileLLVM )
+import           CompilerJVM                    ( compileJVM )
 
 import           ParInstant
 import           ErrM
@@ -22,39 +23,25 @@ showTree tree = do
     putStrLn $ "\n[Linearized tree]\n\n" ++ printTree tree
 
 
-check :: String -> String -> IO String
-check file s = case pProgram (myLexer s) of
+check :: String -> String -> String -> IO String
+check file mode s = case pProgram (myLexer s) of
     Bad err -> do
         hPutStrLn stderr $ "[Syntax error] " ++ err
         exitFailure
     Ok tree -> do
-        showTree tree
-        genCode <- runExceptT $ compileJVM (takeBaseName file) tree
+        -- showTree tree
+        let compiler = if mode == "llvm" then compileLLVM else compileJVM
+        genCode <- runExceptT $ compiler (takeBaseName file) tree
         case genCode of
             Left e -> do
                 hPutStrLn stderr $ "[Compiler exception] " ++ e
                 exitFailure
-            Right (strs, _) -> return $ unlines strs
-        -- x tree
-        -- compileLLVM
-        -- tcRes <- runExceptT $ runTypeChecker tree
-        -- case tcRes of
-        --     Left e -> do
-        --         hPutStrLn stderr $ "[Typecheck exception] " ++ e
-        --         exitFailure
-        --     Right _ -> do
-        --         res <- runExceptT $ runInterpreter tree
-        --         case res of
-        --             Left e -> do
-        --                 hPutStrLn stderr $ "[Runtime exception] " ++ e
-        --                 exitFailure
-        --             Right _ -> return ()
+            Right strs -> return strs
 
-
-saveFile :: String -> String -> IO ()
-saveFile filename content = do
-    -- let name = replaceExtension filename ".ll"
-    let name = replaceExtension filename ".j"
+saveFile :: String -> String -> String -> IO ()
+saveFile filename mode content = do
+    let extension = if mode == "llvm" then ".ll" else ".j"
+    let name      = replaceExtension filename extension
     writeFile name content
     return ()
 
@@ -62,7 +49,9 @@ main :: IO ()
 main = do
     args <- getArgs
     case args of
-        [file] -> readFile file >>= check file >>= saveFile file
-        _      -> do
-            putStrLn "Usage: ??? <SourceFile>"
+        [mode, file] -> do
+            let mode_ = map toLower mode
+            readFile file >>= check file mode_ >>= saveFile file mode_
+        _ -> do
+            putStrLn "Usage: instc_<jvm\\llvm> <SourceFile> <jvm\\llvm>"
             exitFailure
