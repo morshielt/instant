@@ -11,6 +11,7 @@ import           Control.Monad.State            ( StateT
                                                 , gets
                                                 , modify
                                                 , foldM
+                                                , liftIO
                                                 )
 import           Control.Monad.Except           ( ExceptT
                                                 , lift
@@ -27,7 +28,7 @@ import           Data.Map                      as M
 import           AbsInstant
 import           Utils
 
-type ExpDifficulty = Integer
+-- type ExpDifficulty = Integer
 
 type Var = String
 type Location = Integer
@@ -65,58 +66,67 @@ genExpr ss = flip (.) jvmOutro <$> foldM go nop ss
 transStmt :: Stmt -> JM ShowS
 transStmt (SAss ident exp) = transAss ident exp
 transStmt (SExp exp      ) = do
-    (code, stack, _) <- transExp exp
+    (code, stack) <- transExp exp
+    -- liftIO
+    --     .  putStrLn
+    --     $  "sTop: "
+    --     ++ show sTop
+    --     ++ " sBot: "
+    --     ++ show sBot
+    --     ++ "\n"
+    --     ++ show exp
+    --     ++ "\n---------------------------------------------"
     modify (\st -> st { maxStack = max printfStack $ max stack $ maxStack st })
     return (code . printf)
     where printfStack = 2
 
 transAss :: Ident -> Exp -> JM ShowS
 transAss (Ident ident) exp = do
-    (code, expStack, _) <- transExp exp
-    modify (\st -> st { maxStack = max expStack $ maxStack st })
-    index <- retrieveOrAlloc
+    (code, stack) <- transExp exp
+    modify (\st -> st { maxStack = max stack $ maxStack st })
+    state <- get
+    index <- case M.lookup ident (varToLoc state) of
+        Nothing -> do
+            let index = fromIntegral $ M.size $ varToLoc state
+            modify (\st -> st { varToLoc = M.insert ident index $ varToLoc st })
+            return index
+        Just index -> return index
     return (code . istore index)
-  where
-    retrieveOrAlloc :: JM Integer
-    retrieveOrAlloc = do
-        state <- get
-        case M.lookup ident (varToLoc state) of
-            Nothing -> do
-                let index = fromIntegral $ M.size $ varToLoc state
-                modify
-                    (\st -> st { varToLoc = M.insert ident index $ varToLoc st }
-                    )
-                return index
-            Just index -> return index
 
-transExp :: Exp -> JM (ShowS, Stack, ExpDifficulty)
-transExp (ExpLit integer      ) = return (ipush integer, 1, 1)
+transExp :: Exp -> JM (ShowS, Stack)
+transExp (ExpLit integer      ) = return (ipush integer, 1)
 transExp (ExpVar (Ident ident)) = do
     varToLoc <- gets varToLoc
     case M.lookup ident varToLoc of
         Nothing    -> lift . throwE $ "Undefined variable " ++ ident
-        Just index -> return (iload index, 1, 1)
+        Just index -> return (iload index, 1)
 transExp (ExpAdd exp1 exp2) = transBinOp exp1 exp2 (showString "  iadd\n") nop
 transExp (ExpSub exp1 exp2) = transBinOp exp1 exp2 (showString "  isub\n") swap
 transExp (ExpMul exp1 exp2) = transBinOp exp1 exp2 (showString "  imul\n") nop
 transExp (ExpDiv exp1 exp2) = transBinOp exp1 exp2 (showString "  idiv\n") swap
 
-transBinOp :: Exp -> Exp -> ShowS -> ShowS -> JM (ShowS, Stack, ExpDifficulty)
+transBinOp :: Exp -> Exp -> ShowS -> ShowS -> JM (ShowS, Stack)
 transBinOp exp1 exp2 op optionalSwap = do
-    (code1, stack1, diff1) <- transExp exp1
-    (code2, stack2, diff2) <- transExp exp2
+    (code1, stack1) <- transExp exp1
+    (code2, stack2) <- transExp exp2
 
-    let stack = if stack1 == stack2 then stack1 + 1 else max stack1 stack2
-    -- (liftIO . putStrLn) (show stack ++ "\n" ++ show exp1 ++ "\n" ++ show exp2)
-    let code = if diff1 >= diff2
-            then code1 . code2 . op
-            else code2 . code1 . optionalSwap . op
-    let diff = diff1 + diff2 + 1
-    -- TODO: remove asserts
-    if diff1 >= diff2
-        then assert (stack1 >= stack2) return (code, stack, diff)
-        else assert (stack1 <= stack2) return (code, stack, diff)
+    -- (liftIO . putStrLn) "````````````````````````````````````"
+    -- (liftIO . putStrLn) (show s1top ++ "\n" ++ show s1bot ++ "\n" ++ show exp1)
+    -- (liftIO . putStrLn) (show s2top ++ "\n" ++ show s2bot ++ "\n" ++ show exp2)
+    -- (liftIO . putStrLn) "````````````````````````````````````"
+    -- let stack12 = 1 + s2top
+    -- let stack21 = 1 + s1top
+    -- if stack12 <= stack21
+    --     then return (code1 . code2 . op, (stack12, max stack1 (stack2 + 1)))
+    --     else
+    --         return
+    --             ( code2 . code1 . optionalSwap . op
+    --             , (stack21, max (stack1 + 1) stack2)
+    --             )
 
+    if stack2 <= stack1
+        then return (code1 . code2 . op, max stack1 (stack2 + 1))
+        else return (code2 . code1 . optionalSwap . op, max (stack1 + 1) stack2)
 
 jvmIntro :: String -> ShowS
 jvmIntro className = showSify
