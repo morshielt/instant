@@ -7,21 +7,13 @@ import           System.FilePath.Posix          ( replaceExtension
 import           System.IO                      ( stderr
                                                 , hPutStrLn
                                                 )
-import           Control.Monad.Except
-import           Control.Monad                  ( when )
+import           Control.Monad.Except           ( runExceptT )
 
 import           CompilerLLVM                   ( compileLLVM )
 import           CompilerJVM                    ( compileJVM )
 
 import           ParInstant
 import           ErrM
-import           PrintInstant
-
-showTree :: (Show a, Print a) => a -> IO ()
-showTree tree = do
-    putStrLn $ "\n[Abstract Syntax]\n\n" ++ show tree
-    putStrLn $ "\n[Linearized tree]\n\n" ++ printTree tree
-
 
 check :: String -> String -> String -> IO String
 check file mode s = case pProgram (myLexer s) of
@@ -29,12 +21,11 @@ check file mode s = case pProgram (myLexer s) of
         hPutStrLn stderr $ "[Syntax error] " ++ err
         exitFailure
     Ok tree -> do
-        -- showTree tree
         let compiler = if mode == "llvm" then compileLLVM else compileJVM
         genCode <- runExceptT $ compiler (takeBaseName file) tree
         case genCode of
             Left e -> do
-                hPutStrLn stderr $ "[Compiler exception] " ++ e
+                hPutStrLn stderr $ "[Compilation error] " ++ e
                 exitFailure
             Right strs -> return strs
 
@@ -53,5 +44,5 @@ main = do
             let mode_ = map toLower mode
             readFile file >>= check file mode_ >>= saveFile file mode_
         _ -> do
-            putStrLn "Usage: instc_<jvm\\llvm> <SourceFile> <jvm\\llvm>"
+            putStrLn "Usage: ./insc_<jvm/llvm> <file>"
             exitFailure

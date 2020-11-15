@@ -3,15 +3,12 @@ module CompilerJVM
     )
 where
 
--- TODO: remove assert import
-import           Control.Exception              ( assert )
 import           Control.Monad.State            ( StateT
                                                 , evalStateT
                                                 , get
                                                 , gets
                                                 , modify
                                                 , foldM
-                                                , liftIO
                                                 )
 import           Control.Monad.Except           ( ExceptT
                                                 , lift
@@ -28,7 +25,6 @@ import           Data.Map                      as M
 import           AbsInstant
 import           Utils
 
--- type ExpDifficulty = Integer
 
 type Var = String
 type Location = Integer
@@ -67,15 +63,6 @@ transStmt :: Stmt -> JM ShowS
 transStmt (SAss ident exp) = transAss ident exp
 transStmt (SExp exp      ) = do
     (code, stack) <- transExp exp
-    -- liftIO
-    --     .  putStrLn
-    --     $  "sTop: "
-    --     ++ show sTop
-    --     ++ " sBot: "
-    --     ++ show sBot
-    --     ++ "\n"
-    --     ++ show exp
-    --     ++ "\n---------------------------------------------"
     modify (\st -> st { maxStack = max printfStack $ max stack $ maxStack st })
     return (code . printf)
     where printfStack = 2
@@ -98,7 +85,7 @@ transExp (ExpLit integer      ) = return (ipush integer, 1)
 transExp (ExpVar (Ident ident)) = do
     varToLoc <- gets varToLoc
     case M.lookup ident varToLoc of
-        Nothing    -> lift . throwE $ "Undefined variable " ++ ident
+        Nothing    -> lift . throwE $ "Undefined variable `" ++ ident ++ "`"
         Just index -> return (iload index, 1)
 transExp (ExpAdd exp1 exp2) = transBinOp exp1 exp2 (showString "  iadd\n") nop
 transExp (ExpSub exp1 exp2) = transBinOp exp1 exp2 (showString "  isub\n") swap
@@ -109,24 +96,10 @@ transBinOp :: Exp -> Exp -> ShowS -> ShowS -> JM (ShowS, Stack)
 transBinOp exp1 exp2 op optionalSwap = do
     (code1, stack1) <- transExp exp1
     (code2, stack2) <- transExp exp2
-
-    -- (liftIO . putStrLn) "````````````````````````````````````"
-    -- (liftIO . putStrLn) (show s1top ++ "\n" ++ show s1bot ++ "\n" ++ show exp1)
-    -- (liftIO . putStrLn) (show s2top ++ "\n" ++ show s2bot ++ "\n" ++ show exp2)
-    -- (liftIO . putStrLn) "````````````````````````````````````"
-    -- let stack12 = 1 + s2top
-    -- let stack21 = 1 + s1top
-    -- if stack12 <= stack21
-    --     then return (code1 . code2 . op, (stack12, max stack1 (stack2 + 1)))
-    --     else
-    --         return
-    --             ( code2 . code1 . optionalSwap . op
-    --             , (stack21, max (stack1 + 1) stack2)
-    --             )
-
     if stack2 <= stack1
         then return (code1 . code2 . op, max stack1 (stack2 + 1))
         else return (code2 . code1 . optionalSwap . op, max (stack1 + 1) stack2)
+
 
 jvmIntro :: String -> ShowS
 jvmIntro className = showSify

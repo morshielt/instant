@@ -24,8 +24,6 @@ import           Data.Map                      as M
 import           AbsInstant
 import           Utils
 
--- TODO: sdiv czy udiv sprawdzić
--- TODO: align 4 czy bez?
 type Var = String
 type Register = Integer
 type Store = M.Map Var Register
@@ -80,7 +78,7 @@ transExp (ExpLit integer      ) = return (nop, shows integer)
 transExp (ExpVar (Ident ident)) = do
     state <- get
     case M.lookup ident (varToRegister state) of
-        Nothing -> lift . throwE $ "Undefined variable" ++ ident
+        Nothing -> lift . throwE $ "Undefined variable `" ++ ident ++ "`"
         Just id -> do
             let register = freeRegister state
             modify (\st -> st { freeRegister = register + 1 })
@@ -118,8 +116,7 @@ regName :: Integer -> ShowS
 regName reg = showString "%r" . shows reg
 
 alloca :: Register -> ShowS
-alloca reg =
-    showString "  " . regName reg . showString " = alloca i32" . align4endl
+alloca reg = showString "  " . regName reg . showString " = alloca i32" . endl
 
 load :: Register -> Register -> ShowS
 load to from =
@@ -127,15 +124,11 @@ load to from =
         . regName to
         . showString " = load i32, i32* "
         . regName from
-        . align4endl
+        . endl
 
 store :: ShowS -> Register -> ShowS
 store val to =
-    showString "  store i32 "
-        . val
-        . showString ", i32* "
-        . regName to
-        . align4endl
+    showString "  store i32 " . val . showString ", i32* " . regName to . endl
 
 printf :: ShowS -> ShowS
 printf val =
@@ -152,6 +145,3 @@ binOp op val1 val2 to =
         . showString ", "
         . val2
         . endl
-
-align4endl :: ShowS
-align4endl = showString ", align 4" . endl
